@@ -76,4 +76,4 @@ If you'd like to contribute to this project, please follow these steps:
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 ```
 
-In this README template, replace placeholders like `<yourusername>` and `<your-repo-name>` with your actual GitHub username and repository name. Also, be sure to include a demo GIF or video of your project in the "Demo" section to showcase its functionality.
+Happy coding
