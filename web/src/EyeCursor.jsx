@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 // Keep in sync with main.py — same landmark indices and tuning constants.
@@ -13,7 +13,6 @@ const CLICK_COOLDOWN_MS = 1000;
 const FPS_UPDATE_INTERVAL_MS = 500;
 
 async function createLandmarker(resolver) {
-  // Prefer GPU; fall back to CPU if WebGL is unavailable.
   const baseConfig = {
     modelAssetPath:
       "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
@@ -41,148 +40,193 @@ export default function EyeCursor() {
   const canvasRef = useRef(null);
   const smoothed = useRef({ x: null, y: null });
   const lastClickAt = useRef(0);
-  const [status, setStatus] = useState("loading model…");
+
+  // Mutable handles so the Stop button (outside the effect) can tear things down.
+  const handlesRef = useRef({
+    landmarker: null,
+    stream: null,
+    rafId: 0,
+    cancelled: false,
+  });
+
+  const [status, setStatus] = useState("idle");
+  const [running, setRunning] = useState(false);
   const [clicks, setClicks] = useState(0);
   const [fps, setFps] = useState(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    let landmarker;
-    let rafId;
-    let stream;
+  const stop = useCallback(() => {
+    const h = handlesRef.current;
+    h.cancelled = true;
+    cancelAnimationFrame(h.rafId);
+    h.rafId = 0;
+    if (h.stream) {
+      h.stream.getTracks().forEach((t) => t.stop());
+      h.stream = null;
+    }
+    if (h.landmarker) {
+      try {
+        h.landmarker.close();
+      } catch {
+        // ignore — already closed
+      }
+      h.landmarker = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    if (canvasRef.current) {
+      const ctx = canvasRef.current.getContext("2d");
+      ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+    }
+    smoothed.current = { x: null, y: null };
+    setRunning(false);
+    setStatus("stopped");
+    setFps(0);
+  }, []);
+
+  const start = useCallback(async () => {
+    if (handlesRef.current.landmarker || handlesRef.current.stream) return;
+    handlesRef.current.cancelled = false;
+    setStatus("loading model…");
+    setRunning(true);
+
     let lastFrameAt = performance.now();
     let smoothedFps = 0;
     let lastFpsPublishAt = 0;
 
-    async function start() {
-      try {
-        const resolver = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
-        );
-        if (cancelled) return;
+    const isCancelled = () => handlesRef.current.cancelled;
 
-        landmarker = await createLandmarker(resolver);
-        if (cancelled) {
-          landmarker.close();
-          landmarker = null;
-          return;
-        }
+    try {
+      const resolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
+      );
+      if (isCancelled()) return;
 
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          stream = null;
-          return;
-        }
-
-        const video = videoRef.current;
-        if (!video) return;
-        video.srcObject = stream;
-        await video.play();
-        if (cancelled) return;
-
-        setStatus("tracking");
-        loop();
-      } catch (err) {
-        if (!cancelled) {
-          console.error(err);
-          setStatus(`error: ${err.message}`);
-        }
+      const landmarker = await createLandmarker(resolver);
+      if (isCancelled()) {
+        landmarker.close();
+        return;
       }
-    }
+      handlesRef.current.landmarker = landmarker;
 
-    function loop() {
-      if (cancelled) return;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      if (isCancelled()) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      handlesRef.current.stream = stream;
+
       const video = videoRef.current;
-      const canvas = canvasRef.current;
-      if (!video || !canvas || !landmarker) return;
+      if (!video) return;
+      video.srcObject = stream;
+      await video.play();
+      if (isCancelled()) return;
 
-      const w = video.videoWidth;
-      const h = video.videoHeight;
-      if (w && h && (canvas.width !== w || canvas.height !== h)) {
-        canvas.width = w;
-        canvas.height = h;
-      }
+      setStatus("tracking");
 
-      const ctx = canvas.getContext("2d");
-      ctx.save();
-      ctx.scale(-1, 1);
-      ctx.drawImage(video, -w, 0, w, h);
-      ctx.restore();
+      const loop = () => {
+        if (isCancelled()) return;
+        const v = videoRef.current;
+        const canvas = canvasRef.current;
+        const lm = handlesRef.current.landmarker;
+        if (!v || !canvas || !lm) return;
 
-      const result = landmarker.detectForVideo(video, performance.now());
-      const landmarks = result.faceLandmarks?.[0];
+        const w = v.videoWidth;
+        const h = v.videoHeight;
+        if (w && h && (canvas.width !== w || canvas.height !== h)) {
+          canvas.width = w;
+          canvas.height = h;
+        }
 
-      if (landmarks) {
-        ctx.fillStyle = "#64ff32";
-        for (const i of RIGHT_IRIS) {
-          const lm = landmarks[i];
-          const x = (1 - lm.x) * w;
-          const y = lm.y * h;
+        const ctx = canvas.getContext("2d");
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.drawImage(v, -w, 0, w, h);
+        ctx.restore();
+
+        const result = lm.detectForVideo(v, performance.now());
+        const landmarks = result.faceLandmarks?.[0];
+
+        if (landmarks) {
+          ctx.fillStyle = "#64ff32";
+          for (const i of RIGHT_IRIS) {
+            const p = landmarks[i];
+            ctx.beginPath();
+            ctx.arc((1 - p.x) * w, p.y * h, 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          const iris = landmarks[IRIS_TRACKING];
+          const targetX = (1 - iris.x) * w;
+          const targetY = iris.y * h;
+          if (smoothed.current.x === null) {
+            smoothed.current = { x: targetX, y: targetY };
+          } else {
+            smoothed.current.x += (targetX - smoothed.current.x) * SMOOTHING;
+            smoothed.current.y += (targetY - smoothed.current.y) * SMOOTHING;
+          }
+
+          ctx.strokeStyle = "#ff5577";
+          ctx.lineWidth = 2;
           ctx.beginPath();
-          ctx.arc(x, y, 3, 0, Math.PI * 2);
-          ctx.fill();
+          ctx.arc(smoothed.current.x, smoothed.current.y, 14, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(smoothed.current.x - 8, smoothed.current.y);
+          ctx.lineTo(smoothed.current.x + 8, smoothed.current.y);
+          ctx.moveTo(smoothed.current.x, smoothed.current.y - 8);
+          ctx.lineTo(smoothed.current.x, smoothed.current.y + 8);
+          ctx.stroke();
+
+          const upper = landmarks[LEFT_EYE_UPPER];
+          const lower = landmarks[LEFT_EYE_LOWER];
+          const eyeGap = Math.abs(upper.y - lower.y);
+          const now = performance.now();
+          if (eyeGap < BLINK_THRESHOLD && now - lastClickAt.current > CLICK_COOLDOWN_MS) {
+            lastClickAt.current = now;
+            setClicks((c) => c + 1);
+          }
+          if (eyeGap < BLINK_THRESHOLD) {
+            ctx.fillStyle = "rgba(255, 85, 119, 0.25)";
+            ctx.fillRect(0, 0, w, h);
+          }
         }
 
-        const iris = landmarks[IRIS_TRACKING];
-        const targetX = (1 - iris.x) * w;
-        const targetY = iris.y * h;
-        if (smoothed.current.x === null) {
-          smoothed.current = { x: targetX, y: targetY };
-        } else {
-          smoothed.current.x += (targetX - smoothed.current.x) * SMOOTHING;
-          smoothed.current.y += (targetY - smoothed.current.y) * SMOOTHING;
-        }
-
-        ctx.strokeStyle = "#ff5577";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(smoothed.current.x, smoothed.current.y, 14, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(smoothed.current.x - 8, smoothed.current.y);
-        ctx.lineTo(smoothed.current.x + 8, smoothed.current.y);
-        ctx.moveTo(smoothed.current.x, smoothed.current.y - 8);
-        ctx.lineTo(smoothed.current.x, smoothed.current.y + 8);
-        ctx.stroke();
-
-        const upper = landmarks[LEFT_EYE_UPPER];
-        const lower = landmarks[LEFT_EYE_LOWER];
-        const eyeGap = Math.abs(upper.y - lower.y);
         const now = performance.now();
-        if (eyeGap < BLINK_THRESHOLD && now - lastClickAt.current > CLICK_COOLDOWN_MS) {
-          lastClickAt.current = now;
-          setClicks((c) => c + 1);
+        const dt = (now - lastFrameAt) / 1000;
+        lastFrameAt = now;
+        if (dt > 0) smoothedFps = 0.9 * smoothedFps + 0.1 * (1 / dt);
+        if (now - lastFpsPublishAt > FPS_UPDATE_INTERVAL_MS) {
+          setFps(smoothedFps);
+          lastFpsPublishAt = now;
         }
 
-        if (eyeGap < BLINK_THRESHOLD) {
-          ctx.fillStyle = "rgba(255, 85, 119, 0.25)";
-          ctx.fillRect(0, 0, w, h);
-        }
+        handlesRef.current.rafId = requestAnimationFrame(loop);
+      };
+      loop();
+    } catch (err) {
+      if (!isCancelled()) {
+        console.error(err);
+        setStatus(`error: ${err.message}`);
+        stop();
       }
-
-      const now = performance.now();
-      const dt = (now - lastFrameAt) / 1000;
-      lastFrameAt = now;
-      if (dt > 0) {
-        smoothedFps = 0.9 * smoothedFps + 0.1 * (1 / dt);
-      }
-      if (now - lastFpsPublishAt > FPS_UPDATE_INTERVAL_MS) {
-        setFps(smoothedFps);
-        lastFpsPublishAt = now;
-      }
-
-      rafId = requestAnimationFrame(loop);
     }
+  }, [stop]);
 
+  // Auto-start on mount, and always tear down on unmount.
+  useEffect(() => {
     start();
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(rafId);
-      landmarker?.close();
-      stream?.getTracks().forEach((t) => t.stop());
+    return stop;
+  }, [start, stop]);
+
+  // Allow Esc to stop, matching the Python CLI.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape" && running) stop();
     };
-  }, []);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [running, stop]);
 
   return (
     <div style={{ padding: 24, textAlign: "center" }}>
@@ -203,9 +247,37 @@ export default function EyeCursor() {
         />
       </div>
 
-      <div style={{ marginTop: 16, fontFamily: "ui-monospace, monospace" }}>
-        FPS: {fps.toFixed(1)} &nbsp;·&nbsp; Blinks: {clicks}
+      <div
+        style={{
+          marginTop: 16,
+          display: "flex",
+          gap: 12,
+          justifyContent: "center",
+          alignItems: "center",
+          fontFamily: "ui-monospace, monospace",
+        }}
+      >
+        <button
+          onClick={running ? stop : start}
+          style={{
+            background: running ? "#ff5577" : "#6c63ff",
+            color: "white",
+            border: "none",
+            borderRadius: 8,
+            padding: "8px 16px",
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          {running ? "Stop" : "Start"}
+        </button>
+        <span>FPS: {fps.toFixed(1)}</span>
+        <span>Blinks: {clicks}</span>
       </div>
+      <p style={{ marginTop: 12, color: "#6b7280", fontSize: 12 }}>
+        Press <kbd>Esc</kbd> or click <b>Stop</b> to release the camera.
+      </p>
     </div>
   );
 }
