@@ -1,79 +1,87 @@
-#EDC
-Developed a real-time Eye Detection Cursor (EDC) system using Python, OpenCV, Mediapipe, and PyAutoGUI, enabling hands-free cursor control by tracking facial landmarks and performing click actions based on specific landmark positions. This project utilized computer vision and automation techniques to enhance user interaction with the computer 
-
-```markdown
 # Eye Detection Cursor (EDC)
 
-The Eye Detection Cursor (EDC) is a Python-based project that enables hands-free cursor control by tracking facial landmarks in real-time and performing click actions based on specific landmark positions. This project utilizes computer vision and automation techniques to enhance user interaction with the computer interface.
+Hands-free mouse control using your webcam. EDC tracks your iris with MediaPipe FaceMesh to move the cursor and detects blinks to click — useful for accessibility, hands-busy demos, and as a real-time computer-vision learning project.
 
-## Table of Contents
-
-- [Demo](#demo)
-- [Features](#features)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [License](#license)
+![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?logo=opencv&logoColor=white)
+![MediaPipe](https://img.shields.io/badge/MediaPipe-0097A7?logo=google&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
 ## Demo
 
-Include a GIF or video demonstrating the EDC in action.
+> _Add a GIF here — record with QuickTime / Peek / LICEcap and save as `docs/demo.gif`._
+
+```
+![demo](docs/demo.gif)
+```
+
+## How it works
+
+| Stage | What happens |
+|---|---|
+| Capture | OpenCV reads frames from your webcam at native FPS |
+| Detect | MediaPipe FaceMesh extracts 478 facial landmarks (with iris refinement) |
+| Track | Iris landmark `475` is mapped from normalized image coords → screen coords |
+| Smooth | Exponential moving average dampens cursor jitter |
+| Click | Vertical gap between left-eye lid landmarks `145`/`159` shrinking past a threshold triggers a click |
+| Debounce | Non-blocking timestamp check enforces a minimum gap between clicks |
 
 ## Features
 
-- Real-time eye tracking and cursor control.
-- Hands-free navigation of the computer interface.
-- Automatic click actions based on specific facial landmarks.
+- Real-time iris tracking — runs comfortably at 25–30 FPS on a laptop CPU
+- Exponential cursor smoothing (configurable)
+- Non-blocking click debounce (no UI freeze)
+- Configurable sensitivity, cooldown, camera index, and mirror mode via CLI
+- Debug overlay with live FPS and landmark visualization
 
-## Getting Started
+## Install
 
-### Prerequisites
+```bash
+git clone https://github.com/AayushCharde/EDC.git
+cd EDC
+python -m venv .venv && source .venv/bin/activate   # optional but recommended
+pip install -r requirements.txt
+```
 
-Before you begin, ensure you have the following requirements:
+Requires Python 3.9+.
 
-- Python (3.x)
-- OpenCV
-- Mediapipe
-- PyAutoGUI
+## Run
 
-### Installation
+```bash
+python main.py                          # default settings
+python main.py --debug                  # show FPS + landmark overlay
+python main.py --smoothing 0.2          # smoother (slower) cursor
+python main.py --blink-threshold 0.004  # stricter blink detection
+python main.py --camera 1               # use external webcam
+```
 
-1. Clone the repository:
+Press `q` in the preview window to quit.
 
-   ```bash
-   git clone https://github.com/yourusername/eye-detection-cursor.git
-   ```
+### CLI options
 
-2. Install the required Python packages:
+| Flag | Default | Purpose |
+|---|---|---|
+| `--smoothing` | `0.3` | Cursor smoothing factor (0–1). Lower = smoother, higher = more responsive. |
+| `--blink-threshold` | `0.005` | Eye-closure threshold in normalized coords. Lower = stricter. |
+| `--click-cooldown` | `1.0` | Minimum seconds between clicks. |
+| `--camera` | `0` | Camera device index. |
+| `--no-mirror` | off | Disable horizontal mirroring of the camera feed. |
+| `--debug` | off | Show FPS + landmark overlay. |
 
-   ```bash
-   pip install opencv-python mediapipe pyautogui
-   ```
+## Limitations
 
-## Usage
+- Tracking accuracy depends on lighting and distance from the camera (~50–80 cm works best).
+- No calibration step — cursor mapping is direct from iris position to screen, so head movement also moves the cursor. A 4-corner calibration is a planned improvement.
+- Blink detection uses a single threshold, so users with smaller eye apertures may need to lower `--blink-threshold`.
+- Built on `pyautogui`, which means it works on macOS, Linux, and Windows but may need accessibility permissions on macOS.
 
-1. Run the EDC script:
+## Roadmap
 
-   ```bash
-   python eye_detection_cursor.py
-   ```
-
-2. Follow the on-screen instructions to use the EDC for hands-free cursor control.
-
-## Contributing
-
-If you'd like to contribute to this project, please follow these steps:
-
-1. Fork the repository.
-2. Create a new branch for your feature or bug fix.
-3. Make your changes and ensure they work as expected.
-4. Submit a pull request.
+- [ ] 4-corner calibration on startup
+- [ ] Dwell-click mode (hover N ms instead of blink)
+- [ ] Scroll gesture (look up/down past a threshold)
+- [ ] Headless / config-file mode for accessibility deployment
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-```
-
-Happy coding
+MIT — see [LICENSE](LICENSE).
