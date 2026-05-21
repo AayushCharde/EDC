@@ -1,6 +1,6 @@
 """Eye Detection Cursor — hands-free mouse control via webcam facial-landmark tracking.
 
-Tracks the right iris (MediaPipe FaceMesh landmarks 474-477) to move the cursor
+Tracks the right iris (MediaPipe FaceLandmarker landmarks 474-477) to move the cursor
 and detects left-eye blinks (landmarks 145 / 159) to click. Uses exponential
 smoothing on cursor motion and a non-blocking click debounce.
 """
@@ -8,6 +8,7 @@ smoothing on cursor motion and a non-blocking click debounce.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
@@ -15,20 +16,21 @@ import cv2
 import mediapipe as mp
 import pyautogui
 
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
-# MediaPipe FaceMesh landmark indices.
-# Right iris: 4-point ring around the iris (refine_landmarks=True required).
-RIGHT_IRIS_LANDMARKS = slice(474, 478)
-IRIS_TRACKING_POINT = 1  # index within the iris slice used to drive the cursor
+# MediaPipe FaceLandmarker landmark indices (same as legacy FaceMesh).
+RIGHT_IRIS_LANDMARKS = [474, 475, 476, 477]
+IRIS_TRACKING_POINT = 475  # single landmark used to drive the cursor
 
 # Left eye vertical landmarks — lower lid (145) and upper lid (159).
-# Their vertical distance shrinks toward 0 when the eye closes.
 LEFT_EYE_LOWER = 145
 LEFT_EYE_UPPER = 159
 
 # pyautogui safety: moving cursor to a screen corner aborts the script.
-# Disable so a tracking glitch doesn't kill the program mid-use.
 pyautogui.FAILSAFE = False
+
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,12 +75,28 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
+    if not os.path.exists(MODEL_PATH):
+        print(f"error: model file not found at {MODEL_PATH}", file=sys.stderr)
+        print("Download it with:", file=sys.stderr)
+        print(f'  curl -L -o "{MODEL_PATH}" '
+              '"https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"',
+              file=sys.stderr)
+        return 1
+
     cam = cv2.VideoCapture(args.camera)
     if not cam.isOpened():
         print(f"error: could not open camera index {args.camera}", file=sys.stderr)
         return 1
 
-    face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+    options = vision.FaceLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=vision.RunningMode.VIDEO,
+        num_faces=1,
+        min_face_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    )
+    landmarker = vision.FaceLandmarker.create_from_options(options)
+
     screen_w, screen_h = pyautogui.size()
 
     smoothed_x: float | None = None
@@ -86,6 +104,7 @@ def main() -> int:
     last_click_at = 0.0
     last_frame_at = time.time()
     fps = 0.0
+    frame_timestamp_ms = 0
 
     try:
         while True:
@@ -96,16 +115,31 @@ def main() -> int:
 
             if not args.no_mirror:
                 frame = cv2.flip(frame, 1)
+
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            output = face_mesh.process(rgb_frame)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            frame_timestamp_ms += 33  # ~30fps increment
+            result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+
             frame_h, frame_w, _ = frame.shape
 
-            if output.multi_face_landmarks:
-                landmarks = output.multi_face_landmarks[0].landmark
+            if result.face_landmarks:
+                landmarks = result.face_landmarks[0]
 
-                iris_points = landmarks[RIGHT_IRIS_LANDMARKS]
-                for idx, lm in enumerate(iris_points):
-                    if args.debug:
+                # Iris tracking
+                tracking_lm = landmarks[IRIS_TRACKING_POINT]
+                target_x = tracking_lm.x * screen_w
+                target_y = tracking_lm.y * screen_h
+                if smoothed_x is None:
+                    smoothed_x, smoothed_y = target_x, target_y
+                else:
+                    smoothed_x += (target_x - smoothed_x) * args.smoothing
+                    smoothed_y += (target_y - smoothed_y) * args.smoothing
+                pyautogui.moveTo(smoothed_x, smoothed_y)
+
+                if args.debug:
+                    for idx in RIGHT_IRIS_LANDMARKS:
+                        lm = landmarks[idx]
                         cv2.circle(
                             frame,
                             (int(lm.x * frame_w), int(lm.y * frame_h)),
@@ -113,16 +147,8 @@ def main() -> int:
                             (100, 255, 50),
                             -1,
                         )
-                    if idx == IRIS_TRACKING_POINT:
-                        target_x = lm.x * screen_w
-                        target_y = lm.y * screen_h
-                        if smoothed_x is None:
-                            smoothed_x, smoothed_y = target_x, target_y
-                        else:
-                            smoothed_x += (target_x - smoothed_x) * args.smoothing
-                            smoothed_y += (target_y - smoothed_y) * args.smoothing
-                        pyautogui.moveTo(smoothed_x, smoothed_y)
 
+                # Blink detection
                 lower = landmarks[LEFT_EYE_LOWER]
                 upper = landmarks[LEFT_EYE_UPPER]
                 if args.debug:
@@ -158,12 +184,15 @@ def main() -> int:
                 )
 
             cv2.imshow("Eye Detection Cursor", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q") or key == 27:  # q or Esc
                 break
+    except KeyboardInterrupt:
+        print("\nstopping…", file=sys.stderr)
     finally:
         cam.release()
         cv2.destroyAllWindows()
-        face_mesh.close()
+        landmarker.close()
 
     return 0
 
