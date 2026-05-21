@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
-// Same landmark indices as the Python version.
+// Keep in sync with main.py — same landmark indices and tuning constants.
 const RIGHT_IRIS = [474, 475, 476, 477];
 const IRIS_TRACKING = 475;
 const LEFT_EYE_UPPER = 159;
@@ -10,6 +10,31 @@ const LEFT_EYE_LOWER = 145;
 const SMOOTHING = 0.3;
 const BLINK_THRESHOLD = 0.005;
 const CLICK_COOLDOWN_MS = 1000;
+const FPS_UPDATE_INTERVAL_MS = 500;
+
+async function createLandmarker(resolver) {
+  // Prefer GPU; fall back to CPU if WebGL is unavailable.
+  const baseConfig = {
+    modelAssetPath:
+      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+  };
+  try {
+    return await FaceLandmarker.createFromOptions(resolver, {
+      baseOptions: { ...baseConfig, delegate: "GPU" },
+      outputFaceBlendshapes: false,
+      runningMode: "VIDEO",
+      numFaces: 1,
+    });
+  } catch (err) {
+    console.warn("GPU delegate unavailable, falling back to CPU:", err);
+    return await FaceLandmarker.createFromOptions(resolver, {
+      baseOptions: { ...baseConfig, delegate: "CPU" },
+      outputFaceBlendshapes: false,
+      runningMode: "VIDEO",
+      numFaces: 1,
+    });
+  }
+}
 
 export default function EyeCursor() {
   const videoRef = useRef(null);
@@ -21,41 +46,53 @@ export default function EyeCursor() {
   const [fps, setFps] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
     let landmarker;
     let rafId;
     let stream;
     let lastFrameAt = performance.now();
     let smoothedFps = 0;
+    let lastFpsPublishAt = 0;
 
     async function start() {
       try {
         const resolver = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm",
         );
-        landmarker = await FaceLandmarker.createFromOptions(resolver, {
-          baseOptions: {
-            modelAssetPath:
-              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
-            delegate: "GPU",
-          },
-          outputFaceBlendshapes: false,
-          runningMode: "VIDEO",
-          numFaces: 1,
-        });
+        if (cancelled) return;
+
+        landmarker = await createLandmarker(resolver);
+        if (cancelled) {
+          landmarker.close();
+          landmarker = null;
+          return;
+        }
 
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+          return;
+        }
+
         const video = videoRef.current;
+        if (!video) return;
         video.srcObject = stream;
         await video.play();
+        if (cancelled) return;
+
         setStatus("tracking");
         loop();
       } catch (err) {
-        console.error(err);
-        setStatus(`error: ${err.message}`);
+        if (!cancelled) {
+          console.error(err);
+          setStatus(`error: ${err.message}`);
+        }
       }
     }
 
     function loop() {
+      if (cancelled) return;
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (!video || !canvas || !landmarker) return;
@@ -129,7 +166,10 @@ export default function EyeCursor() {
       lastFrameAt = now;
       if (dt > 0) {
         smoothedFps = 0.9 * smoothedFps + 0.1 * (1 / dt);
+      }
+      if (now - lastFpsPublishAt > FPS_UPDATE_INTERVAL_MS) {
         setFps(smoothedFps);
+        lastFpsPublishAt = now;
       }
 
       rafId = requestAnimationFrame(loop);
@@ -137,6 +177,7 @@ export default function EyeCursor() {
 
     start();
     return () => {
+      cancelled = true;
       cancelAnimationFrame(rafId);
       landmarker?.close();
       stream?.getTracks().forEach((t) => t.stop());
