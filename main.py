@@ -8,9 +8,13 @@ smoothing on cursor motion and a non-blocking click debounce.
 from __future__ import annotations
 
 import argparse
+import functools
 import os
+import signal
 import sys
+import threading
 import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import cv2
 import mediapipe as mp
@@ -31,6 +35,83 @@ LEFT_EYE_UPPER = 159
 pyautogui.FAILSAFE = False
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
+
+# Shared flag to signal shutdown from any thread.
+_stop_event = threading.Event()
+
+WEB_PORT = 9876
+STOP_BTN_RECT = (10, 10, 110, 50)  # x1, y1, x2, y2 on the OpenCV window
+
+STOP_PAGE = b"""<!DOCTYPE html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EDC Control</title>
+<style>
+  body{display:flex;align-items:center;justify-content:center;height:100vh;margin:0;
+       background:#1a1a2e;font-family:system-ui}
+  button{font-size:2rem;padding:1rem 3rem;border:none;border-radius:12px;
+         background:#e94560;color:#fff;cursor:pointer;box-shadow:0 4px 20px #e9456080}
+  button:hover{background:#c0392b}
+  .stopped{color:#aaa;font-size:1.5rem}
+</style></head>
+<body>
+  <div id="app"><button onclick="stop()">STOP</button></div>
+  <script>
+    function stop(){
+      fetch('/stop',{method:'POST'}).then(()=>{
+        document.getElementById('app').innerHTML='<p class="stopped">Stopped.</p>';
+      });
+    }
+  </script>
+</body></html>
+"""
+
+
+class _StopHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(STOP_PAGE)
+
+    def do_POST(self):
+        if self.path == "/stop":
+            _stop_event.set()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+            # Force kill after a short delay so cleanup can happen
+            threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *a):
+        pass  # suppress request logs
+
+
+def _start_web_server():
+    server = HTTPServer(("0.0.0.0", WEB_PORT), _StopHandler)
+    server.daemon_threads = True
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server
+
+
+def _on_mouse(event, x, y, flags, param):
+    """OpenCV mouse callback — check if the STOP button was clicked."""
+    if event == cv2.EVENT_LBUTTONDOWN:
+        bx1, by1, bx2, by2 = STOP_BTN_RECT
+        if bx1 <= x <= bx2 and by1 <= y <= by2:
+            _stop_event.set()
+
+
+def _draw_stop_button(frame):
+    bx1, by1, bx2, by2 = STOP_BTN_RECT
+    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 200), -1)
+    cv2.rectangle(frame, (bx1, by1), (bx2, by2), (0, 0, 255), 2)
+    cv2.putText(frame, "STOP", (bx1 + 10, by2 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +180,12 @@ def main() -> int:
 
     screen_w, screen_h = pyautogui.size()
 
+    # Start web stop server and register mouse callback
+    web_server = _start_web_server()
+    print(f"Web stop button at http://localhost:{WEB_PORT}", file=sys.stderr)
+    cv2.namedWindow("Eye Detection Cursor")
+    cv2.setMouseCallback("Eye Detection Cursor", _on_mouse)
+
     smoothed_x: float | None = None
     smoothed_y: float | None = None
     last_click_at = 0.0
@@ -107,7 +194,7 @@ def main() -> int:
     frame_timestamp_ms = 0
 
     try:
-        while True:
+        while not _stop_event.is_set():
             ok, frame = cam.read()
             if not ok or frame is None:
                 print("warning: dropped frame from camera", file=sys.stderr)
@@ -183,6 +270,7 @@ def main() -> int:
                     2,
                 )
 
+            _draw_stop_button(frame)
             cv2.imshow("Eye Detection Cursor", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q") or key == 27:  # q or Esc
@@ -193,6 +281,7 @@ def main() -> int:
         cam.release()
         cv2.destroyAllWindows()
         landmarker.close()
+        web_server.shutdown()
 
     return 0
 
