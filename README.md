@@ -5,7 +5,7 @@ Hands-free mouse control using your webcam. EDC tracks your iris with MediaPipe 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?logo=opencv&logoColor=white)
 ![MediaPipe](https://img.shields.io/badge/MediaPipe-0097A7?logo=google&logoColor=white)
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
+![License: GPL v3](https://img.shields.io/badge/License-GPLv3-green.svg)
 
 ## Demo
 
@@ -84,4 +84,4 @@ Press `q` in the preview window to quit.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+GPL-3.0 — see [LICENSE](LICENSE).
